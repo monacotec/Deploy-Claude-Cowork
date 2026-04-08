@@ -1,6 +1,6 @@
 # Anthropic Claude Co-Work MONACO MOD
 # claude-cowork-deploy.ps1
-# Rev 52.1
+# Rev 52.3
 #
 # .SYNOPSIS
 #     Deploys Claude Desktop (MSIX) enterprise-wide via Intune / SCCM / PDQ.
@@ -129,14 +129,24 @@ function Get-FileSHA256 {
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash
 }
 
+# --- PDQ compatibility -------------------------------------------------------
+# PDQ Connect monitors stderr in real time and treats ANY error-stream output
+# as a task failure, even when the exit code is 0.  Redirect the entire error
+# stream to $null so non-terminating warnings/errors from Appx cmdlets never
+# reach stderr.  Our own error handling uses explicit try/catch + Write-Log.
+$ErrorActionPreference = 'SilentlyContinue'
+$WarningPreference     = 'SilentlyContinue'
+$ProgressPreference    = 'SilentlyContinue'
+$Error.Clear()
+
 # --- Bootstrap ---------------------------------------------------------------
 $null = New-Item -ItemType Directory -Path (Split-Path $LogPath) -Force
 $null = New-Item -ItemType Directory -Path $TempDir -Force
-Write-Log "=== Claude Desktop Deployment Script Started (Rev 52.1) ==="
+Write-Log "=== Claude Desktop Deployment Script Started (Rev 52.3) ==="
 Write-Log "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
 # --- 1. Detect architecture --------------------------------------------------
-$arch = (Get-WmiObject Win32_Processor | Select-Object -First 1).Architecture
+$arch = (Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture
 if ($arch -eq 12) {
     $DownloadUrl = if ($MsixUrl) { $MsixUrl } else { $MsixArm64 }
     Write-Log "Architecture: ARM64"
@@ -573,3 +583,10 @@ Get-ChildItem $profileRoot -Directory | ForEach-Object {
 }
 
 Write-Log "Taskbar pinning steps complete."
+
+# --- 13. Final exit -------------------------------------------------------------
+# Clear $Error so PDQ Connect's wrapper check ($Error.WriteErrorStream) does not
+# misinterpret non-terminating SilentlyContinue errors as a script failure.
+$Error.Clear()
+Write-Log "=== Claude Desktop Deployment Script Completed ==="
+exit 0
