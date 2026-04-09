@@ -1,6 +1,6 @@
 # Anthropic Claude Co-Work MONACO MOD
 # claude-cowork-deploy.ps1
-# Rev 52.3
+# Rev 52.4
 #
 # .SYNOPSIS
 #     Deploys Claude Desktop (MSIX) enterprise-wide via Intune / SCCM / PDQ.
@@ -142,7 +142,7 @@ $Error.Clear()
 # --- Bootstrap ---------------------------------------------------------------
 $null = New-Item -ItemType Directory -Path (Split-Path $LogPath) -Force
 $null = New-Item -ItemType Directory -Path $TempDir -Force
-Write-Log "=== Claude Desktop Deployment Script Started (Rev 52.3) ==="
+Write-Log "=== Claude Desktop Deployment Script Started (Rev 52.4) ==="
 Write-Log "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
 # --- 1. Detect architecture --------------------------------------------------
@@ -160,7 +160,7 @@ if (-not $SkipVmpEnable) {
     Write-Log "Checking Virtual Machine Platform feature..."
     $vmp = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
     if ($vmp -and $vmp.State -eq "Enabled") {
-        Write-Log "VirtualMachinePlatform already enabled - skipping."
+        Write-Log "VirtualMachinePlatform feature is enabled."
     } else {
         Write-Log "Enabling VirtualMachinePlatform..."
         try {
@@ -179,6 +179,80 @@ if (-not $SkipVmpEnable) {
             Write-Log "Failed to enable VirtualMachinePlatform: $_" "WARN"
             Write-Log "Cowork may not function until this feature is enabled and the device is rebooted." "WARN"
         }
+    }
+
+    # --- 2b. Verify virtualization services are actually running ----------------
+    # The feature being "Enabled" only means the bits are installed. The
+    # underlying services must also be running for Cowork to function.
+    # If they aren't running after enablement, a reboot is required.
+    Write-Log "Verifying virtualization services are operational..."
+    $vmpRebootNeeded = $false
+
+    # Check Hyper-V Host Compute Service (vmcompute) - core VM execution engine
+    $vmcompute = Get-Service -Name "vmcompute" -ErrorAction SilentlyContinue
+    if ($vmcompute) {
+        if ($vmcompute.Status -ne "Running") {
+            Write-Log "Service 'vmcompute' (Hyper-V Host Compute) exists but is $($vmcompute.Status) - attempting to start..."
+            try {
+                Start-Service -Name "vmcompute" -ErrorAction Stop
+                Write-Log "Service 'vmcompute' started successfully."
+            } catch {
+                Write-Log "Failed to start 'vmcompute': $_ - a reboot is likely required." "WARN"
+                $vmpRebootNeeded = $true
+            }
+        } else {
+            Write-Log "Service 'vmcompute' is running."
+        }
+    } else {
+        Write-Log "Service 'vmcompute' not found - reboot required to initialize VirtualMachinePlatform." "WARN"
+        $vmpRebootNeeded = $true
+    }
+
+    # Check Hyper-V Virtual Machine Management service (vmms) if present
+    $vmms = Get-Service -Name "vmms" -ErrorAction SilentlyContinue
+    if ($vmms) {
+        if ($vmms.Status -ne "Running") {
+            Write-Log "Service 'vmms' (Hyper-V VM Management) exists but is $($vmms.Status) - attempting to start..."
+            try {
+                Start-Service -Name "vmms" -ErrorAction Stop
+                Write-Log "Service 'vmms' started successfully."
+            } catch {
+                Write-Log "Failed to start 'vmms': $_ - a reboot may be required." "WARN"
+                $vmpRebootNeeded = $true
+            }
+        } else {
+            Write-Log "Service 'vmms' is running."
+        }
+    } else {
+        Write-Log "Service 'vmms' not present (normal if full Hyper-V role is not installed)."
+    }
+
+    # Validate that the hypervisor is actually operational via WMI/CIM
+    try {
+        $hypervisor = Get-CimInstance -Namespace "root\virtualization\v2" -ClassName "Msvm_ComputerSystem" -ErrorAction Stop |
+            Where-Object { $_.Caption -eq "Hosting Computer System" } | Select-Object -First 1
+        if ($hypervisor) {
+            Write-Log "Hypervisor is operational (Msvm_ComputerSystem query succeeded)."
+        } else {
+            Write-Log "Hypervisor WMI namespace exists but returned no hosting system - reboot may be needed." "WARN"
+            $vmpRebootNeeded = $true
+        }
+    } catch {
+        Write-Log "Hypervisor WMI query failed: $_ - virtualization is not yet operational." "WARN"
+        $vmpRebootNeeded = $true
+    }
+
+    if ($vmpRebootNeeded) {
+        Write-Log "VIRTUALIZATION NOT OPERATIONAL: Feature is enabled but services are not responding. A reboot is required." "WARN"
+        if ($RebootPolicy -eq "Force") {
+            Write-Log "RebootPolicy=Force - scheduling reboot to activate virtualization."
+            shutdown /r /t 60 /c "Claude Desktop: Virtualization services require a reboot to become operational."
+            exit 0
+        } else {
+            Write-Log "RebootPolicy=$RebootPolicy - reboot not forced. Cowork will not function until the device is rebooted." "WARN"
+        }
+    } else {
+        Write-Log "Virtualization is fully operational."
     }
 } else {
     Write-Log "SkipVmpEnable=$true - skipping VirtualMachinePlatform step."
